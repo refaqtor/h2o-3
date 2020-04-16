@@ -769,7 +769,8 @@ public class StackedEnsembleTest extends TestUtil {
 
             ModelMetrics training_metrics = stackedEnsembleModel._output._training_metrics;
             ModelMetrics training_clone_metrics = ModelMetrics.getFromDKV(stackedEnsembleModel, training_clone);
-            Assert.assertEquals(training_metrics.mse(), training_clone_metrics.mse(), 1e-15);
+            // SE now uses only a subset of training data to generate training metrics
+            Assert.assertEquals(training_metrics.mse(), training_clone_metrics.mse(), 1e-2);
             training_clone.remove();
 
             if (validation_frame != null) {

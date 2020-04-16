@@ -16,6 +16,7 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Stream;
 
 import static hex.Model.Parameters.FoldAssignmentScheme.AUTO;
 import static hex.Model.Parameters.FoldAssignmentScheme.Random;
@@ -107,6 +108,49 @@ public class StackedEnsembleModel extends Model<StackedEnsembleModel,StackedEnse
     public Key<Frame>[] _base_model_predictions_keys; 
   }
 
+  public static class StackedEnsembleMRScorer extends MRTask<StackedEnsembleMRScorer> {
+    // IN
+    private Frame scoringFrame;
+    private String seKey;
+    private Job job;
+
+    // OUT
+    private Frame levelOneFrame;
+
+    StackedEnsembleMRScorer(Frame scoringFrame, String seKey, Job j) {
+      this.scoringFrame = scoringFrame;
+      this.seKey = seKey;
+      this.job = j;
+    }
+
+    @Override
+    public void map(Key key) {
+      levelOneFrame = new Frame();
+      Model baseModel = (Model) key.get();
+      Frame basePreds = baseModel.score(
+              scoringFrame,
+              "preds_base_" + seKey + scoringFrame._key,
+              job,
+              false
+      );
+      StackedEnsemble.addModelPredictionsToLevelOneFrame(baseModel, basePreds, levelOneFrame);
+      DKV.remove(basePreds._key); //FIXME: is this necessary? It seems to me that `deleteTempFrameAndItsNonSharedVecs` should take care of it
+      Frame.deleteTempFrameAndItsNonSharedVecs(basePreds, levelOneFrame);
+    }
+
+    @Override
+    public void reduce(StackedEnsembleMRScorer mrt) {
+      levelOneFrame.add(mrt.levelOneFrame);
+    }
+
+    public Frame getLevelOneFrame() {
+      // levelOneFrame can be uninitialized when we don't have any useful base-models, e.g., metalearner is using only intercept
+      levelOneFrame = levelOneFrame == null ? new Frame() : levelOneFrame;
+      levelOneFrame._key = Key.<Frame>make("preds_levelone_" + seKey + scoringFrame._key);
+      return levelOneFrame;
+    }
+  }
+
   /**
    * For StackedEnsemble we call score on all the base_models and then combine the results
    * with the metalearner to create the final predictions frame.
@@ -118,41 +162,11 @@ public class StackedEnsembleModel extends Model<StackedEnsembleModel,StackedEnse
    */
   @Override
   protected Frame predictScoreImpl(Frame fr, Frame adaptFrm, String destination_key, Job j, boolean computeMetrics, CFuncRef customMetricFunc) {
-    Frame levelOneFrame = new Frame(Key.<Frame>make("preds_levelone_" + this._key.toString() + fr._key));
+    Key[] baseModels = Stream.of(_parms._base_models)
+            .filter(this::isUsefulBaseModel)
+            .toArray(Key[]::new);
 
-    List<H2O.H2OCountedCompleter> tasks = new ArrayList<>();
-    final String seKey = this._key.toString();
-
-    // Run scoring of base models in parallel
-    for (Key<Model> baseModelKey : _parms._base_models) {
-      if (isUsefulBaseModel(baseModelKey)) {
-        tasks.add(
-                H2O.submitTask(
-                        new H2O.H2OCountedCompleter() {
-                          @Override
-                          public void compute2() {
-                            Model baseModel = baseModelKey.get();
-
-                            Frame basePreds = baseModel.score(
-                                    fr,
-                                    "preds_base_" + seKey + fr._key,
-                                    j,
-                                    false
-                            );
-
-                            StackedEnsemble.addModelPredictionsToLevelOneFrame(baseModel, basePreds, levelOneFrame);
-                            DKV.remove(basePreds._key); //Cleanup
-                            Frame.deleteTempFrameAndItsNonSharedVecs(basePreds, levelOneFrame);
-                            tryComplete();
-                          }
-                        }));
-      }
-    }
-
-    // Wait for the completion of the base model scoring
-    for (H2O.H2OCountedCompleter task : tasks) {
-      task.join();
-    }
+    Frame levelOneFrame = new StackedEnsembleMRScorer(fr, _key.toString(), j).doAll(baseModels).getLevelOneFrame();
 
     // Add response column to level one frame
     levelOneFrame.add(this.responseColumn, adaptFrm.vec(this.responseColumn));
@@ -161,7 +175,6 @@ public class StackedEnsembleModel extends Model<StackedEnsembleModel,StackedEnse
     Log.info("Finished creating \"level one\" frame for scoring: " + levelOneFrame.toString());
 
     // Score the dataset, building the class distribution & predictions
-
     Model metalearner = this._output._metalearner;
     Frame predictFr = metalearner.score(
         levelOneFrame, 
@@ -225,26 +238,15 @@ public class StackedEnsembleModel extends Model<StackedEnsembleModel,StackedEnse
   }
 
   ModelMetrics doScoreMetricsOneFrame(Frame frame, Job job) {
-    if (_parms._training_scoring_subsample_size > 0 && _parms._training_scoring_subsample_size < frame.numRows()) { 
-Frame scoredFrame = (_parms._training_scoring_subsample_size > 0 && _parms._training_scoring_subsample_size < frame.numRows()) 
-        ? MRUtils.sampleFrame(frame, _parms._training_scoring_subsample_size, _parms._seed)
-        : frame;
-try {
-      Frame pred = this.predictScoreImpl(frame, new Frame(scoredFrame), null, job, true, CFuncRef.from(_parms._custom_metric_func));
+    Frame scoredFrame = (_parms._training_scoring_subsample_size > 0 && _parms._training_scoring_subsample_size < frame.numRows())
+            ? MRUtils.sampleFrame(frame, _parms._training_scoring_subsample_size, _parms._seed)
+            : frame;
+    try {
+      Frame pred = this.predictScoreImpl(scoredFrame, new Frame(scoredFrame), null, job, true, CFuncRef.from(_parms._custom_metric_func));
       pred.delete();
-      return ModelMetrics.getFromDKV(this, frame);
-} finally {
-     if (scoredFrame != frame) scoredFrame.delete();
-}  
-      Frame pred = this.predictScoreImpl(frame, new Frame(frame), null, job, true, CFuncRef.from(_parms._custom_metric_func));
-      pred.delete();
-      ModelMetrics metrics = ModelMetrics.getFromDKV(this, frame);
-      frame.delete();
-      return metrics;
-    } else {
-      Frame pred = this.predictScoreImpl(frame, new Frame(frame), null, job, true, CFuncRef.from(_parms._custom_metric_func));
-      pred.delete();
-      return ModelMetrics.getFromDKV(this, frame);
+      return ModelMetrics.getFromDKV(this, scoredFrame);
+    } finally {
+      if (scoredFrame != frame) scoredFrame.delete();
     }
   }
 
