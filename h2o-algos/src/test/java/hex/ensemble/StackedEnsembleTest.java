@@ -21,14 +21,11 @@ import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
 import water.*;
 import water.fvec.Chunk;
 import water.fvec.Frame;
 import water.fvec.NewChunk;
 import water.fvec.Vec;
-import water.runner.CloudSize;
-import water.runner.H2ORunner;
 import water.util.ArrayUtils;
 import water.util.Log;
 
@@ -38,8 +35,6 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.fail;
 
-@RunWith(H2ORunner.class)
-@CloudSize(1)
 public class StackedEnsembleTest extends TestUtil {
 
     @BeforeClass public static void stall() { stall_till_cloudsize(1); }
