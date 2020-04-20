@@ -11,6 +11,7 @@ import water.udf.CFuncRef;
 import water.util.Log;
 import water.util.MRUtils;
 import water.util.ReflectionUtils;
+import water.util.FrameUtils;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -136,6 +137,28 @@ public class StackedEnsembleModel extends Model<StackedEnsembleModel,StackedEnse
       StackedEnsemble.addModelPredictionsToLevelOneFrame(baseModel, basePreds, levelOneFrame);
       DKV.remove(basePreds._key); //FIXME: is this necessary? It seems to me that `deleteTempFrameAndItsNonSharedVecs` should take care of it
       Frame.deleteTempFrameAndItsNonSharedVecs(basePreds, levelOneFrame);
+
+      // FIXME: seems fishy to me and there is probably better solution to this problem
+      // Invoking `FrameUtils.cleanUp` seems to be necessary in multinode setting to prevent leaks.
+      // The leaks are occuring from the keys that were created on the slave[1] nodes - more specifically it appears to be
+      // limited to "adapted missing vectors".
+      /*
+       for (Map.Entry<Key, String>  entry: (java.util.Set < Map.Entry < Key, String>>) baseModel._toDelete.entrySet()) {
+         System.out.println(">>>>> Key ='".concat(entry.getKey().toString()).concat("' value = '").concat(entry.getValue()).concat("'"));
+       }
+      */
+      // prints:
+      /*
+      >>>>> Key ='$04ff11000000ffffffff$nfs:/.././smalldata/testng/prostate_test.csv' value = 'adapted missing vectors' << This is leaked without the cleanup
+      >>>>> Key ='$04ff1c000000ffffffff$nfs:/.././smalldata/testng/prostate_test.csv' value = 'categorically adapted vec'
+      >>>>> Key ='$04ff1d000000ffffffff$nfs:/.././smalldata/testng/prostate_test.csv' value = 'categorically adapted vec'
+      >>>>> Key ='$04ff10000000ffffffff$nfs:/.././smalldata/testng/prostate_test.csv' value = 'adapted missing vectors' << This is leaked without the cleanup
+      */
+      // And leaks both of the "adapted missing vectors" on the slave[1] node.
+      //
+      // [1] By slave node I meant a node that wasn't the one that was directly invoked to run the test
+
+      FrameUtils.cleanUp(baseModel._toDelete);
     }
 
     @Override
